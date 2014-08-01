@@ -1,0 +1,173 @@
+                                Project #0
+                                ==========
+
+This Project is due at 11:59pm Wednesday July 30th, 2014.
+
+You are to set up a kernel-based locking mechanism that processes
+may use.  A single process may use the locking mechanisms on its own
+but there are more efficient ways for a single process to implement
+locking for just itself.  This system is meant to be more useful for
+having multiple processes manipulating the locks.  As an example of
+how this might be used, suppose there is a large database package
+(e.g. something like Oracle) where there is one main process that
+handles incoming database requests.  It checks for a kernel lock, and
+if the lock is set it allows for transactions to occur but it does not
+actually try to commit the updates to the database files on the disk.
+Instead it keeps a transaction log and only updates the database files
+after the kernel lock is cleared.  An administrator can run a separate
+program that sets the lock in the kernel.  After running that
+program the administrator knows no updates to the database files on
+disk will occur and s/he can safely back up the disk files to tape
+(daily backups).  After the backups have completed the administrator
+runs another program that clears the kernel lock and the database
+process will proceed to update the disk files using the transaction
+log it has been keeping.  This sort of locking is usually done using
+"lock files" in the filesystem but they have the disadvantage of not
+being removed if the system crashes at "the wrong time".  Note that in
+this case the process that sets the lock actually exits leaving the
+lock set, expecting some other process to run later that clears the
+lock.
+
+You are to implement the following new system calls (use this as what
+you add to syscalls.master):
+
+534     AUE_NULL        STD     { int set_lgname(char *lgn, int pid); }
+535     AUE_NULL        STD     { int get_lgname(char *lgn); }
+536     AUE_NULL        STD     { int create_lock(char *name, int perms); }
+537     AUE_NULL        STD     { int set_lock(char *name, int slpflg); }
+538     AUE_NULL        STD     { int clear_lock(char *name); }
+539     AUE_NULL        STD     { int check_lock(char *name); }
+540     AUE_NULL        STD     { int destroy_lock(char *name); }
+
+Note that in class I mentioned the arguments to system calls are
+copied into kernel space but, in the case of strings, it is the
+address of the string that is copied into kernel space and not
+the string itself.  You need to carefully copy the string itself
+into kernel space before working with it, and when returning
+data to the user level processes you need to be careful about
+how you copy the data into the buffer the user provided.  Take
+a look at the manual page for copy(9), it lists functions that
+can safely do these copies for you (copyin(), copyout(), etc).
+One of the easier examples of using copyin(9) I was able to find
+is the setitimer(2) system call.  Using the "vi -t" trick look
+at the sys_setitimer() function in the kernel code.  It uses copyin(9)
+and copyout(9) to handle transferring some itimerval structures
+from user-level to kernel space and vice-versa.  It is not safe
+to use strlen() on a string before using copyin(9) (that's the
+entire point of copyin(9) - it is not safe to access user-level
+memory from the kernel without taking special precautions because
+it is *possible* that memory got paged out so trying to access it
+would generate a page fault).  But you can use copyinstr(9), with
+the target being a buffer in the kernel that is the maximum allowed
+size for the string being transferred.
+
+Before a process can manipulate locks the "Lock Group Name" must be
+set using set_lgname(2).  The Lock Group Name can be up to 8
+characters long and, once set for a given process, should be inherited
+by all children of that process.  Any process may set a Lock Group
+Name that is not currently in use by any existing locks.  A process
+that is not root-owned may only set its Lock Group Name to an existing
+name if that Lock Group Name was created by the same user-id.  A
+root-owned process may set its Lock Group Name to anything it wants
+whether it is in use or not.  The pid parameter is the
+process-id that should have its Lock Group Name set.  A root-owned
+process may set the Lock Group Name of any process, even if that
+process already has a Lock Group Name set.  A non-root-owned process
+may set the Lock Group Name of any process owned by the same user-id.
+If the pid argument is 0 the Lock Group Name should be set for the
+currently running process, no matter what its actual PID is.  A
+convenient way to work on the project is to set the Lock Group Name of
+your shell after you log into a crash machine, so that any test
+programs you then run from the shell inherit the name.  If you have a
+test program to set the Lock Group Name you can run it like this:
+
+        ./set_lgn Fred $$
+
+The first argument to your test program is the name, the second is the
+process-id of what process to set the Lock Group Name for.  The "$$"
+in the above command is special to your command shell (tcsh).  It
+means "the process-id of the currently running shell" so no matter
+what process-id your shell has the result of the above command would
+be setting your shell's Lock Group Name to "Fred" (and now any
+commands you run from that shell will inherit that name).
+
+The get_lgname(2) system call should copy the Lock Group Name to the
+buffer provided by the user.
+
+To create a lock a process calls create_lock(2).  The first argument
+(name) is a string up to 255 characters long and represents the name
+of the lock.  Organize the locks inside the kernel based on the Lock
+Group Name.  Up to 32 locks with unique names may be created for any
+given Lock Group Name.  It should not be an error for locks to have
+the same name but different Lock Group Names.
+
+The perms argument to create_lock(2) should be used to determine
+how widely the lock can be shared.  If the perms argument is 0x0
+any process may use it no matter who owns the process or who
+created the lock.  If the perms argument is 0x1 only processes
+running as the same user as the process that created the lock may
+do any of the other operations on the lock, even if they are in
+the same lock group name.  As usual on Unix root owned processes
+should be allowed to do anything regardless of the perms setting.
+
+set_lock(2) should try to set the named lock.  If the lock is already
+set and the slpflag is non-zero then the process should go to sleep
+waiting for the lock to be cleared, returning only when it has found
+the lock to be cleared and successfully sets the lock.  If the lock is
+already set and slpflag is zero then set_lock(2) should immediately
+return giving an appropriate error code.
+
+check_lock(2) should take a string argument and check to see if the
+lock of that name is set.  The return value should be 1 if the lock is
+set, zero if the lock is not set, or -1 (with errno set appropriately)
+if there was an error.
+
+clear_lock(2) should take a string argument and clears the named lock
+if called by a process with the right lock group name.
+
+destroy_lock(2) should take a string argument and deallocate anything
+associated with the named lock if the lock is clear, or return an
+error if the lock is set (or anything else that could be wrong).  This
+should avoid any problems that might come from locks being destroyed
+while processes are sleeping waiting for them.
+
+You should pay attention to multiprocessor based issues in your code
+as it applies to protecting your data structures.  You will need to be
+using linked list(s) to keep track of the locks inside the kernel.  Use
+appropriate "synchronization" mechanisms to prevent two kernel threads of
+control from manipulating the linked list(s) at the same time, setting a lock
+at the exact same time, etc.
+
+For documentation you must provide in the directory ~/OSI/Project_0
+the following things:
+
+        A file named README containing anything you think we need to
+        know about your Project while grading it.
+
+        A file named CHANGELOG that identifies what files you needed
+        to change and a VERY BRIEF description of why.
+
+        A file named TESTING that describes how you tested your system
+        calls.  You MUST TEST things, by writing user-level programs
+        that use the above system calls.  As part of this requirement
+        you must also leave the C programs you wrote to test things and
+        the executable files for those programs in this same directory
+        so we can run them as part of grading.  Make sure to write the
+        test programs themselves with the thought of someone else running
+        them in mind.  Use command line arguments to provide
+        flexibility wherever possible.
+
+        Manual pages for each of the system calls you implemented.
+
+You can create manual pages by "stealing" a similar one and just editing
+it to reflect these system calls instead of the one you stole it from.
+The manual pages for most if not all of the system calls are available
+in ~/OSI/src/lib/libc/sys, for example kill.2 in that directory is the
+manual page for kill(2).  What is in kill.2 is a "markup language"
+based on "roff".  You can see the formatted output by doing:
+
+        nroff -man kill.2 | more
+
+You can use kill.2 (or any of the others if you think one of the others
+is closer to the system calls you added) as the starting point for your
+manual pages and just edit the contents.
